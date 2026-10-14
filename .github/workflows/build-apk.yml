@@ -17,6 +17,9 @@ jobs:
 
       - name: Locate Gradle project
         run: |
+          for z in ./*.zip; do
+            [ -f "$z" ] && unzip -oq "$z" -d _unzipped_project
+          done
           F=$(find . -name settings.gradle.kts -not -path "*/.git/*" | head -1)
           if [ -z "$F" ]; then
             echo "::error::settings.gradle.kts not found in the repo. Upload the project files to the repo."
