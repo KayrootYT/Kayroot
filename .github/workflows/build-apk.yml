@@ -1,5 +1,4 @@
-
-name: Build Kayroot Engine APK
+name: Build Kayroot Engine APK v2.20
 
 on:
   push:
@@ -15,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Kayroot Engine 2.2
+    name: Build Kayroot Engine 2.20
     runs-on: ubuntu-latest
 
     steps:
@@ -23,18 +22,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Java setup
+      # 2. Set up Java 17
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # 3. Android SDK setup
+      # 3. Set up Android SDK
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: ""
 
       - name: Install Android SDK packages
         shell: bash
@@ -45,7 +42,7 @@ jobs:
           SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
 
           if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::Android SDK sdkmanager not found at $SDKMANAGER"
+            echo "::error::Android SDK sdkmanager not found."
             find "$SDK/cmdline-tools" -name sdkmanager -type f 2>/dev/null || true
             exit 1
           fi
@@ -57,41 +54,40 @@ jobs:
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-      # 4. Gradle setup
+      # 4. Set up Gradle
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      # 5. Extract only Kayroot Engine 2.2
-      - name: Extract Kayroot Engine 2.2
+      # 5. Extract Kayroot Engine v2.20
+      - name: Extract Kayroot Engine v2.20
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP="$GITHUB_WORKSPACE/Kayroot_Engine_2_2.zip"
-          DEST="$RUNNER_TEMP/kayroot22"
+          ZIP="$GITHUB_WORKSPACE/Kayroot_Engine_2_20.zip"
+          DEST="$RUNNER_TEMP/kayroot220"
 
           if [ ! -f "$ZIP" ]; then
-            echo "::error::Kayroot_Engine_2_2.zip not found in repository root."
-            echo "Upload the ZIP to your GitHub repository."
+            echo "::error::Kayroot_Engine_2_20.zip not found in repository root."
             exit 1
           fi
 
           mkdir -p "$DEST"
           unzip -oq "$ZIP" -d "$DEST"
 
-          F=$(find "$DEST" \
+          SETTINGS_FILE=$(find "$DEST" \
             -name settings.gradle.kts \
             -not -path "*/.git/*" \
             -print -quit)
 
-          if [ -z "$F" ]; then
+          if [ -z "$SETTINGS_FILE" ]; then
             echo "::error::settings.gradle.kts not found in ZIP."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$F")"
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
           if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
             echo "::error::app/build.gradle.kts not found."
@@ -99,12 +95,12 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Kayroot project: $PROJECT_DIR"
 
+          echo "Project directory: $PROJECT_DIR"
           echo "----- Project settings -----"
-          cat "$F"
+          cat "$SETTINGS_FILE"
 
-      # 6. Validate project configuration
+      # 6. Verify project configuration
       - name: Verify project configuration
         shell: bash
         run: |
@@ -112,24 +108,24 @@ jobs:
 
           GRADLE_FILE="$PROJECT_DIR/app/build.gradle.kts"
 
-          grep -q 'com.kayroot.engine' "$GRADLE_FILE" || {
+          grep -Eq 'applicationId\s*=\s*"com\.kayroot\.engine"' "$GRADLE_FILE" || {
             echo "::error::Unexpected application ID."
             exit 1
           }
 
-          grep -q 'versionCode = 22' "$GRADLE_FILE" || {
-            echo "::error::Expected versionCode 22."
+          grep -Eq 'versionCode\s*=\s*220([[:space:]]|$)' "$GRADLE_FILE" || {
+            echo "::error::Expected versionCode = 220."
             exit 1
           }
 
-          grep -q 'versionName = "2.2"' "$GRADLE_FILE" || {
-            echo "::error::Expected versionName 2.2."
+          grep -Eq 'versionName\s*=\s*"2\.20"' "$GRADLE_FILE" || {
+            echo "::error::Expected versionName = \"2.20\"."
             exit 1
           }
 
-          echo "Project configuration verified."
+          echo "Kayroot Engine v2.20 configuration verified."
 
-      # 7. Optional release signing
+      # 7. Configure optional release signing
       - name: Configure release signing
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -157,7 +153,7 @@ jobs:
             echo "Release keystore configured."
           else
             echo "No custom keystore configured."
-            echo "The project will use its configured debug-signing fallback."
+            echo "Using the project's configured signing settings."
           fi
 
       # 8. Build release APK
@@ -171,19 +167,24 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # 9. Verify and rename APK
+      # 9. Find, verify and rename APK
       - name: Verify and rename APK
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE="$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk"
-          OUTPUT="$GITHUB_WORKSPACE/KayrootEngine-v2.2.apk"
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/release"
+          OUTPUT="$GITHUB_WORKSPACE/KayrootEngine-v2.20.apk"
+
+          SOURCE="$APK_DIR/app-release.apk"
 
           if [ ! -f "$SOURCE" ]; then
+            SOURCE=$(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print -quit)
+          fi
+
+          if [ -z "${SOURCE:-}" ] || [ ! -f "$SOURCE" ]; then
             echo "::error::Release APK was not generated."
-            find "$PROJECT_DIR/app/build/outputs" \
-              -type f 2>/dev/null || true
+            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
             exit 1
           fi
 
@@ -196,16 +197,15 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: KayrootEngine-v2.2-apk
-          path: KayrootEngine-v2.2.apk
+          name: KayrootEngine-v2.20-apk
+          path: KayrootEngine-v2.20.apk
           if-no-files-found: error
           retention-days: 30
 
-      # 11. Publish release when a v* tag is pushed
+      # 11. Publish GitHub Release for version tags
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: KayrootEngine-v2.2.apk
+          files: KayrootEngine-v2.20.apk
           generate_release_notes: true
-          
