@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Kayroot Engine 2.20
+    name: Build Kayroot Engine v2.20
     runs-on: ubuntu-latest
 
     steps:
@@ -29,30 +29,41 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # 3. Set up Android SDK
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+      # 3. Install Android SDK packages directly
+      # Avoid setup-android action's package resolution error
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
 
-          if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::Android SDK sdkmanager not found."
-            find "$SDK/cmdline-tools" -name sdkmanager -type f 2>/dev/null || true
+          echo "Android SDK: $SDK"
+
+          SDKMANAGER=$(find "$SDK/cmdline-tools" \
+            -type f -name sdkmanager -print -quit 2>/dev/null || true)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found."
+            echo "Available SDK directories:"
+            ls -la "$SDK" 2>/dev/null || true
+            find /usr/local/lib/android/sdk/cmdline-tools \
+              -type f -name sdkmanager 2>/dev/null || true
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          echo "Using sdkmanager: $SDKMANAGER"
 
-          "$SDKMANAGER" \
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses \
+            >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" --sdk_root="$SDK" --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
+
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
       # 4. Set up Gradle
       - name: Set up Gradle
@@ -60,7 +71,7 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      # 5. Extract Kayroot Engine v2.20
+      # 5. Extract Kayroot Engine v2.20 project
       - name: Extract Kayroot Engine v2.20
         shell: bash
         run: |
@@ -70,7 +81,8 @@ jobs:
           DEST="$RUNNER_TEMP/kayroot220"
 
           if [ ! -f "$ZIP" ]; then
-            echo "::error::Kayroot_Engine_2_20.zip not found in repository root."
+            echo "::error::Kayroot_Engine_2_20.zip not found."
+            echo "Upload the ZIP to the repository root."
             exit 1
           fi
 
@@ -94,13 +106,17 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "Gradle wrapper not found; using installed Gradle 8.9."
+          fi
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo "Project directory: $PROJECT_DIR"
           echo "----- Project settings -----"
           cat "$SETTINGS_FILE"
 
-      # 6. Verify project configuration
+      # 6. Verify application ID and v2.20 version
       - name: Verify project configuration
         shell: bash
         run: |
@@ -108,24 +124,26 @@ jobs:
 
           GRADLE_FILE="$PROJECT_DIR/app/build.gradle.kts"
 
-          grep -Eq 'applicationId\s*=\s*"com\.kayroot\.engine"' "$GRADLE_FILE" || {
-            echo "::error::Unexpected application ID."
+          grep -Eq 'applicationId[[:space:]]*=[[:space:]]*"com\.kayroot\.engine"' "$GRADLE_FILE" || {
+            echo "::error::Expected applicationId com.kayroot.engine."
             exit 1
           }
 
-          grep -Eq 'versionCode\s*=\s*220([[:space:]]|$)' "$GRADLE_FILE" || {
+          grep -Eq 'versionCode[[:space:]]*=[[:space:]]*220([[:space:]]|$)' "$GRADLE_FILE" || {
             echo "::error::Expected versionCode = 220."
+            echo "Update app/build.gradle.kts inside the ZIP."
             exit 1
           }
 
-          grep -Eq 'versionName\s*=\s*"2\.20"' "$GRADLE_FILE" || {
-            echo "::error::Expected versionName = \"2.20\"."
+          grep -Eq 'versionName[[:space:]]*=[[:space:]]*"2\.20"' "$GRADLE_FILE" || {
+            echo "::error::Expected versionName = 2.20."
+            echo "Update app/build.gradle.kts inside the ZIP."
             exit 1
           }
 
           echo "Kayroot Engine v2.20 configuration verified."
 
-      # 7. Configure optional release signing
+      # 7. Configure optional custom release signing
       - name: Configure release signing
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -145,15 +163,20 @@ jobs:
 
             printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KS"
 
+            if [ ! -s "$KS" ]; then
+              echo "::error::Keystore file is empty."
+              exit 1
+            fi
+
             echo "KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
             echo "KEYSTORE_PASSWORD=$KS_PASSWORD" >> "$GITHUB_ENV"
             echo "KEY_ALIAS=$KS_ALIAS" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$KS_KEY_PASSWORD" >> "$GITHUB_ENV"
 
-            echo "Release keystore configured."
+            echo "Custom release keystore configured."
           else
-            echo "No custom keystore configured."
-            echo "Using the project's configured signing settings."
+            echo "No custom keystore supplied."
+            echo "The project will use its configured debug-signing fallback."
           fi
 
       # 8. Build release APK
@@ -167,7 +190,7 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # 9. Find, verify and rename APK
+      # 9. Verify and rename APK
       - name: Verify and rename APK
         shell: bash
         run: |
@@ -175,20 +198,29 @@ jobs:
 
           APK_DIR="$PROJECT_DIR/app/build/outputs/apk/release"
           OUTPUT="$GITHUB_WORKSPACE/KayrootEngine-v2.20.apk"
-
           SOURCE="$APK_DIR/app-release.apk"
 
           if [ ! -f "$SOURCE" ]; then
-            SOURCE=$(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print -quit)
+            SOURCE=$(find "$APK_DIR" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' \
+              -print -quit 2>/dev/null || true)
           fi
 
           if [ -z "${SOURCE:-}" ] || [ ! -f "$SOURCE" ]; then
             echo "::error::Release APK was not generated."
-            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
+            find "$PROJECT_DIR/app/build/outputs" \
+              -type f 2>/dev/null || true
             exit 1
           fi
 
           cp "$SOURCE" "$OUTPUT"
+
+          if [ ! -s "$OUTPUT" ]; then
+            echo "::error::Generated APK is empty."
+            exit 1
+          fi
 
           echo "APK successfully generated:"
           ls -lh "$OUTPUT"
@@ -202,7 +234,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 11. Publish GitHub Release for version tags
+      # 11. Publish GitHub Release for v* tags
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
