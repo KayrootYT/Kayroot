@@ -1,9 +1,13 @@
-name: Build APK
+
+name: Build Kayroot Engine APK
 
 on:
   push:
-    branches: [ main, master ]
-    tags: [ 'v*' ]
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -11,74 +15,155 @@ permissions:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Locate Gradle project
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract ZIP and locate project
+        shell: bash
         run: |
-          for z in ./*.zip; do
-            [ -f "$z" ] && unzip -oq "$z" -d _unzipped_project
+          set -euo pipefail
+
+          mkdir -p _unzipped_project
+
+          shopt -s nullglob
+          zip_files=(./*.zip)
+
+          for z in "${zip_files[@]}"; do
+            echo "Extracting: $z"
+            unzip -oq "$z" -d _unzipped_project
           done
-          F=$(find . -name settings.gradle.kts -not -path "*/.git/*" | head -1)
+
+          # Prefer the actual Kayroot project settings file.
+          F=""
+
+          for candidate in \
+            "./settings.gradle.kts" \
+            "./_unzipped_project/settings.gradle.kts"; do
+            if [ -f "$candidate" ]; then
+              F="$candidate"
+              break
+            fi
+          done
+
           if [ -z "$F" ]; then
-            echo "::error::settings.gradle.kts not found in the repo. Upload the project files to the repo."
-            ls -R | head -50
+            F=$(find . \
+              -path "*/.git/*" -prune -o \
+              -path "*/build/*" -prune -o \
+              -name settings.gradle.kts -print -quit)
+          fi
+
+          if [ -z "$F" ]; then
+            echo "::error::settings.gradle.kts not found."
+            echo "Upload the Kayroot project ZIP or project source files."
             exit 1
           fi
-          echo "PROJECT_DIR=$(dirname "$F")" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-java@v4
+          PROJECT_DIR="$(dirname "$F")"
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            echo "::error::app/build.gradle.kts not found in $PROJECT_DIR"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Project directory: $PROJECT_DIR"
+          echo "Project configuration:"
+          cat "$F"
+          cat "$PROJECT_DIR/app/build.gradle.kts"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
+          cache: gradle
 
-      - name: Prepare Android SDK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
         run: |
-          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          sdkmanager --install \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Prepare signing key
+      - name: Configure optional release signing
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          SECRET_KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
-          SECRET_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD_SECRET: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS_SECRET: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
         run: |
-          KS="$RUNNER_TEMP/release.jks"
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
-            echo "KEYSTORE_PASSWORD=$SECRET_KS_PASS" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=$SECRET_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=$SECRET_KEY_PASS" >> "$GITHUB_ENV"
+          set -euo pipefail
+
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            : "${KEYSTORE_PASSWORD_SECRET:?Missing KEYSTORE_PASSWORD secret}"
+            : "${KEY_ALIAS_SECRET:?Missing KEY_ALIAS secret}"
+            : "${KEY_PASSWORD_SECRET:?Missing KEY_PASSWORD secret}"
+
+            KS="$RUNNER_TEMP/kayroot-release.jks"
+
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KS"
+
+            echo "KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KEY_ALIAS_SECRET" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$KEY_PASSWORD_SECRET" >> "$GITHUB_ENV"
+
+            echo "Custom release signing configured."
           else
-            keytool -genkeypair -v -keystore "$KS" -storepass kayroot123 -keypass kayroot123 \
-              -alias kayroot -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Kayroot Engine"
-            echo "KEYSTORE_PASSWORD=kayroot123" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=kayroot" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=kayroot123" >> "$GITHUB_ENV"
+            echo "No custom keystore supplied."
+            echo "The project's debug-signing fallback will be used."
           fi
-          echo "KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
 
-      - name: Build release APK
+      - name: Build Kayroot Engine release APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
+        run: |
+          set -euo pipefail
 
-      - name: Rename APK
-        run: cp "$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk" KayrootEngine-v2.0.apk
+          gradle :app:assembleRelease \
+            --no-daemon \
+            --stacktrace
 
-      - uses: actions/upload-artifact@v4
+      - name: Verify and rename APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE="$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk"
+
+          if [ ! -f "$SOURCE" ]; then
+            echo "::error::Release APK was not generated."
+            find "$PROJECT_DIR/app/build/outputs" -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          cp "$SOURCE" KayrootEngine-v2.2.apk
+
+          ls -lh KayrootEngine-v2.2.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: KayrootEngine-apk
-          path: KayrootEngine-v2.0.apk
+          name: KayrootEngine-v2.2-apk
+          path: KayrootEngine-v2.2.apk
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Publish GitHub Release (only on tags like v2.0)
+      - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: KayrootEngine-v2.0.apk
+          files: KayrootEngine-v2.2.apk
+          generate_release_notes: true
